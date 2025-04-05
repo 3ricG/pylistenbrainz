@@ -1,4 +1,4 @@
-# pylistenbrainz - A simple client library for ListenBrainz
+# liblistenbrainz - A simple client library for ListenBrainz
 # Copyright (C) 2020 Param Singh <iliekcomputers@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
@@ -16,14 +16,19 @@
 
 import json
 import requests
+from requests.adapters import HTTPAdapter
 import time
+from urllib3.util import Retry
 
 from datetime import datetime
 from enum import Enum
-from pylistenbrainz import errors
-from pylistenbrainz.listen import LISTEN_TYPE_IMPORT, LISTEN_TYPE_PLAYING_NOW, LISTEN_TYPE_SINGLE
-from pylistenbrainz.utils import _validate_submit_listens_payload, _convert_api_payload_to_listen
+from liblistenbrainz import errors
+from liblistenbrainz.listen import LISTEN_TYPE_IMPORT, LISTEN_TYPE_PLAYING_NOW, LISTEN_TYPE_SINGLE
+from liblistenbrainz.utils import _validate_submit_listens_payload, _convert_api_payload_to_listen
 from urllib.parse import urljoin
+
+retry_strategy = Retry(total=5, allowed_methods=('GET', 'POST'), status_forcelist=[429, 500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retry_strategy)
 
 STATS_SUPPORTED_TIME_RANGES = (
     'week',
@@ -95,9 +100,13 @@ class ListenBrainz:
         if self._auth_token:
             headers['Authorization'] = f'Token {self._auth_token}'
 
+        session = requests.Session()
+        session.mount("http://", adapter) # http is not used, but in case someone needs to use to for dev work, its included here
+        session.mount("https://", adapter)
+
         try:
             self._wait_until_rate_limit()
-            response = requests.get(
+            response = session.get(
                 urljoin(API_BASE_URL, endpoint),
                 params=params,
                 headers=headers,
@@ -124,9 +133,14 @@ class ListenBrainz:
             headers = {}
         if self._auth_token:
             headers['Authorization'] = f'Token {self._auth_token}'
+
+        session = requests.Session()
+        session.mount("http://", adapter) # http is not used, but in case someone needs to use to for dev work, its included here
+        session.mount("https://", adapter)
+
         try:
             self._wait_until_rate_limit()
-            response = requests.post(
+            response = session.post(
                 urljoin(API_BASE_URL, endpoint),
                 data=data,
                 headers=headers,
@@ -187,7 +201,7 @@ class ListenBrainz:
         Requires that the auth token for the user whose listens are being submitted has been set.
 
         :param listens: the list of listens to be submitted
-        :type listens: List[pylistenbrainz.Listen]
+        :type listens: List[liblistenbrainz.Listen]
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         :raises InvalidSubmitListensPayloadException: if the listens sent are invalid, see exception message for details
         """
@@ -200,7 +214,7 @@ class ListenBrainz:
         Requires that the auth token for the user whose data is being submitted has been set.
 
         :param listen: the listen to be submitted
-        :type listen: pylistenbrainz.Listen
+        :type listen: liblistenbrainz.Listen
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         :raises InvalidSubmitListensPayloadException: if the listen being sent is invalid, see exception message for details
         """
@@ -213,11 +227,32 @@ class ListenBrainz:
         Requires that the auth token for the user whose data is being submitted has been set.
 
         :param listen: the listen to be submitted, the listen should NOT have a `listened_at` attribute
-        :type listen: pylistenbrainz.Listen
+        :type listen: liblistenbrainz.Listen
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         :raises InvalidSubmitListensPayloadException: if the listen being sent is invalid, see exception message for details
         """
         return self._post_submit_listens([listen], LISTEN_TYPE_PLAYING_NOW)
+
+    def submit_user_feedback(self, feedback, recording_mbid):
+        """ Submit a feedback to Listenbrainz
+            
+        Requires that the auth token for the user whose data is being submitted has been set.
+
+        :param feedback The type of feedback 1 = loved, -1 = hated, 0 = delete feedback if any
+        :param recording_mbid The recording Musicbrainz Id of the track being anotated
+        """
+        data = {
+            'score': feedback,
+            'recording_mbid': recording_mbid,
+        }
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        return self._post(
+            '/1/feedback/recording-feedback',
+            data=json.dumps(data),
+            headers=headers,
+        )
 
 
     def delete_listen(self, listen):
@@ -228,7 +263,7 @@ class ListenBrainz:
         Requires that the auth token for the user whose data is being submitted has been set.
 
         :param listen: the listen to be deleted. The listen must have a `listened_at` and `recording_msid` attribute
-        :type listen: pylistenbrainz.Listen
+        :type listen: liblistenbrainz.Listen
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         :raises InvalidSubmitListensPayloadException: if the listen being sent is invalid, see exception message for details
         """
@@ -266,7 +301,7 @@ class ListenBrainz:
         :param username: the username of the user whose data is to be fetched
         :type username: str
         :return: A single listen if the user is playing something currently, else None
-        :rtype: pylistenbrainz.Listen or None
+        :rtype: liblistenbrainz.Listen or None
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         """
         data = self._get('/1/user/{username}/playing-now'.format(username=username))
@@ -292,7 +327,7 @@ class ListenBrainz:
         :param count: the number of listens to return. Defaults to 25, maximum is 100.
         :type count: int, optional
         :return: A list of listens for the user `username`
-        :rtype: List[pylistenbrainz.Listen]
+        :rtype: List[liblistenbrainz.Listen]
         :raises ListenBrainzAPIException: if the ListenBrainz API returns a non 2xx return code
         """
         params = {}
@@ -441,6 +476,34 @@ class ListenBrainz:
         """
         try:
             return self._get(f'/1/user/{username}/listen-count')['payload']['count']
+        except errors.ListenBrainzAPIException as e:
+            if e.status_code == 204:
+                return None
+            else:
+                raise
+
+    def get_user_feedback(self, username, score, metadata, count=100, offset=0 ):
+        """ Get feedback given by user
+        
+        :param username: The user to get the feedbacks from
+        :type username: str
+        :param count: Optional, number of feedback items to return. Default 100.
+        :type count: int, optional
+        :param offset:  Optional, number of feedback items to skip from the beginning, for pagination. Ex. An offset of 5 means the top 5 feedback will be skipped, defaults to 0.
+        :type offset: int, optional
+        :param score: Optional, If 1 then returns the loved recordings, if -1 returns hated recordings.
+        :type score: int, optional
+        :param metadata: Optional, boolean if this call should return the metadata for the feedback.
+        :type metadata: bool, optional
+        """
+        params = {
+                    'count': count,
+                    'offset': offset,
+                    'score': score,
+                    'metadata': metadata,
+                 }
+        try:
+            return self._get(f'/1/feedback/user/{username}/get-feedback', params=params)
         except errors.ListenBrainzAPIException as e:
             if e.status_code == 204:
                 return None
